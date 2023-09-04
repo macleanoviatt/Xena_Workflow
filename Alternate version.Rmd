@@ -1,0 +1,470 @@
+---
+title: "R Notebook"
+output: html_notebook
+---
+
+This is an [R Markdown](http://rmarkdown.rstudio.com) Notebook. When you execute code within the notebook, the results appear beneath the code. 
+
+Try executing this chunk by clicking the *Run* button within the chunk or by placing your cursor inside it and pressing *Ctrl+Shift+Enter*. 
+
+```{r}
+#Input your TCGA cohort of interest and gene target:
+  
+#Gene or Genes of interest 
+Gene_target = "YBX1" 
+
+Cohort = "colon"
+```
+
+
+
+```{r}
+#List of various Hosts, Cohorts, and Datasets provided
+data(XenaData)
+TCGA <- XenaData %>%
+  filter(XenaHostNames == 'tcgaHub')
+View(TCGA)
+```
+
+```{r}
+TCGA_cohort = XenaData %>%
+  filter(XenaHostNames == "tcgaHub") %>% # select TCGA Hub
+  XenaScan(Cohort)   # select TCGA cohort
+
+View(TCGA_cohort)
+```
+
+
+```{r}
+#Based upon the cohort chosen (OV) the clinical dataset is then downloaded and prepared into R as cli. This provides the clinical and survival data for analysis.
+cli_query = TCGA_cohort %>%
+  filter(DataSubtype == "phenotype") %>%  # select clinical dataset
+  XenaGenerate() %>%  # generate a XenaHub object
+  XenaQuery() %>%
+  XenaDownload()
+
+cli = XenaPrepare(cli_query) #download and prepare 
+
+# See a few rows
+head(cli)
+
+```
+
+```{r}
+#Pull all mRNA expression values from TCGA_cohort (NOTE this may vary depending on RNA seq data provided for that specific cohort) Make sure to identify DataSubtype and Label of interest from (TCGA_cohort) Looking also at sample number (larger sample sizes aid in downstream analysis)
+View(TCGA_cohort)
+
+exp_query = TCGA_cohort %>%
+   filter(DataSubtype == "gene expression RNAseq", Label == "IlluminaHiSeq") %>%
+  XenaGenerate() %>%
+  XenaQuery() %>%
+  XenaDownload()
+expression = XenaPrepare(exp_query)
+head(expression)
+
+#transposing the matrix into a dataframe to join Gene expression data with clinical and survival data. 
+expression_flip <- t(expression)
+colnames(expression_flip) <- expression_flip[1,]
+expression_flip <- expression_flip[-c(1),]
+expression_flip <- as.data.frame(expression_flip)
+```
+```{r}
+#query data subtype gene expression to pull gene or genes of interest reminder to use datasubtype and label from previous query
+ge = TCGA_cohort %>%
+  filter(DataSubtype == "gene expression RNAseq", Label == "IlluminaHiSeq")
+
+#Pull gene of interest expression values 
+Gene = fetch_dense_values(host = ge$XenaHosts,
+                          dataset = ge$XenaDatasets,
+                          identifiers = Gene_target,
+                          use_probeMap = TRUE) %>%
+  .[1, ]
+
+#Create dataframe
+Gene_express <- tibble(sampleID = names(Gene),
+                     Gene_expression = as.numeric(Gene))
+as.data.frame(Gene_express)
+head(Gene_express)
+```
+```{r}
+#EDA on our target Gene of interest
+
+describe(Gene_express)
+normality(Gene_express)
+plot_normality(Gene_express)
+head(Gene_express)
+summary(Gene_express)
+hist(Gene_express$Gene_expression)
+
+ggplot(data=Gene_express, aes(x=Gene_expression)) +
+  geom_boxplot(fill="steelblue", color="black") +
+  ggtitle("Histogram of Gene expression in TCGA Cohort")
+
+hist(Gene_express$Gene_expression, freq = FALSE, xlab = "Gene expression", main = "Distribution of expression", col="lightgreen")
+curve(dnorm(x, mean = mean(Gene_express$Gene_expression)), add=TRUE, col="darkblue", lwd=3)
+
+```
+```{r}
+#In this example Based on EDA separating high GBP1 expression from low GBP1 expression for upstream analysis. 
+#You can also use this for condition (tumor vs non tumor...etc.)
+
+Gene_expression = Gene_express %>%
+  mutate(group = case_when(
+    Gene_expression > quantile(Gene_expression, 0.9) ~ 'high',
+    Gene_expression < quantile(Gene_expression, 0.1) ~ 'low'
+  ))
+
+#Function to delete NA's
+delete.na <- function(DF, n=0) {
+  DF[rowSums(is.na(DF)) <= n,]
+}
+Gene_expression <- delete.na(Gene_expression)
+
+Gene_expression$group <- as.factor(Gene_expression$group)
+
+#Separation of high and low expression
+Gene_low <- Gene_expression[Gene_expression[, "group"]== "low",]
+head(Gene_low)
+Gene_high <- Gene_expression[Gene_expression[, "group"]== "high",]
+head(Gene_high)
+
+
+hist(Gene_low$Gene_expression)
+hist(Gene_high$Gene_expression)
+
+ggplot(Gene_expression, aes(group, fill = factor(group)))+
+  geom_bar(position = "fill") +
+  geom_text(aes(label = after_stat(count)), stat = "count", position = "fill")
+```
+```{r}
+#Here you will need to change the clinical subdata you can view the name in the table below (my example OV_survival.txt, OV_clinicalMatrix.txt)
+#View(cli)
+
+#creating survival and clinical dataframes
+survival <- cli$HNSC_survival.txt
+clinical <- cli$HNSC_clinicalMatrix
+
+#Basic information on survival and clinical databases to see completeness and information that could be interesting to investigate
+skim(survival)
+skim(clinical)
+
+#Renaming of sampleID in order to merge datasets
+survival <- rename(survival, sampleID = sample)
+
+#Clinical data with Gene expression
+cli_data =
+  left_join(Gene_expression,clinical, by= "sampleID") 
+head(cli_data)
+
+#Example of investigating gene expression with respect to "phenotypes" (histologic grade)
+#Gene expression with respect to Cancer Grade
+ggplot(data = cli_data) +
+  geom_histogram(mapping = aes(x = Gene_expression, fill=factor(group)), binwidth = 0.1)+
+  facet_wrap(~neoplasm_histologic_grade)
+
+#Survival data with Gene expression
+survival_df =
+  left_join(Gene_expression ,survival, by="sampleID") %>%
+  dplyr::select(sampleID, Gene_expression, group, OS.time, OS,) %>%
+  rename(time = OS.time, status = OS)
+head(survival_df)
+
+#Survival data with gender
+survival_sex =
+  left_join(clinical, survival, by= "sampleID") %>%
+  dplyr::select(sampleID, gender, OS.time, OS,) %>%
+  rename(time = OS.time, status = OS)
+
+#Survival data with gender and expression
+survival_sex_ex =
+  left_join(Gene_expression, survival_sex, by= "sampleID") %>%
+  dplyr::select(sampleID, Gene_expression, group, gender, status, time) #%>%
+  #rename(time = OS.time, status = OS)
+
+#Survival data with sample type
+survival_type =
+  left_join(clinical, survival, by= "sampleID") %>%
+  dplyr::select(sampleID, sample_type, OS.time, OS) %>%
+  rename(time = OS.time, status = OS)
+
+```
+
+```{r}
+#transpose matrix for merging with target gene only expression levels 
+expression_flip <- as.data.frame(expression_flip)
+expression_flip <- tibble::rownames_to_column(expression_flip, "sampleID")
+
+
+#Expression matrix for TCGA cohort (Used for DGE)
+merged_data=
+  left_join(Gene_expression, expression_flip, by= "sampleID")
+ff <- merged_data[-(1:3)]
+merged_data[-(1:3)] <- lapply(ff,as.numeric)
+count_matrix <- t(merged_data)
+count_matrix <- as.data.frame(count_matrix)
+colnames(count_matrix) <- count_matrix[1,]
+count_matrix <-count_matrix[-c(1,2,3),]
+count_matrix <- count_matrix %>%
+  mutate_if(is.character, as.numeric)
+count_matrix <- round(count_matrix)
+```
+
+```{r}
+cli_data %>%
+    create_report(
+        output_file = "~/Target_gene_clinical.html",
+        report_title = "EDA Report - Target gene clinical Dataset",
+        y = "Gene_expression"
+    )
+
+survival_df %>%
+  create_report(
+    output_file = "~/Target_gene_survival.html",
+    report_title = "EDA_Report -Target Gene Survival Dataset",
+    y = "Gene_expression"
+  )
+
+```
+```{r}
+fit = coxph(Surv(time, status) ~ Gene_expression , data = survival_df)
+fit
+
+fit = survfit(Surv(time, status) ~ group, data = survival_df)
+ggsurvplot(fit, pval= TRUE)
+
+ggsurv <- ggsurvplot(
+           fit,                     # survfit object with calculated statistics.
+           data = survival_df,             # data used to fit survival curves.
+           risk.table = TRUE,       # show risk table.
+           pval = TRUE,             # show p-value of log-rank test.
+           conf.int = TRUE,         # show confidence intervals for 
+                                    # point estimates of survival curves.
+           palette = c("#E7B800", "#2E9FDF"),
+           xlim = c(0,5000),         # present narrower X axis, but not affect
+                                    # survival estimates.
+           xlab = "Time in days",   # customize X axis label.
+           break.time.by = 200,     # break X axis in time intervals by 500.
+           ggtheme = theme_light(), # customize plot and risk table with a theme.
+          risk.table.y.text.col = T,# colour risk table text annotations.
+          risk.table.height = 0.25, # the height of the risk table
+          risk.table.y.text = FALSE,# show bars instead of names in text annotations
+                                    # in legend of risk table.
+          ncensor.plot = TRUE,      # plot the number of censored subjects at time t
+          ncensor.plot.height = 0.25,
+          conf.int.style = "step",  # customize style of confidence intervals
+          surv.median.line = "hv",  # add the median survival pointer.
+          legend.labs = 
+            c("High expression", "Low expression")    # change legend labels.
+        )
+ggsurv
+
+#Alternative options for investigation
+
+fit = survfit(Surv(time, status) ~ gender, data = survival_alt)
+ggsurvplot(fit, pval= TRUE)
+
+fit = survfit(Surv(time, status) ~ sample_type, data = survival_type)
+ggsurvplot(fit, pval= TRUE)
+
+fit = survfit(Surv(time, status) ~ gender + group, data = survival_sex_ex)
+ggsurvplot(fit, pval= TRUE)
+
+```
+
+```{r}
+## Discard genes, which are expressed in less than 20% of all samples (considering that we have 2 conditions in total -- high and low )
+##  % selection is based on no. of conditions  ## more condition means less %
+keep <- rowSums(count_matrix > 0) >= round(ncol(count_matrix)*.20)  
+count_matrix <- count_matrix[keep,]
+
+
+##add rownames as sample name (if not already), because pca function check rownames of anno == col of data matrix
+## sort anno based on condition ## good representation in heatmap 
+anno <- Gene_expression 
+anno <- anno[,-2]
+
+rownames(anno) <- anno$sampleID
+
+## log transformation of rawcount for PCA plot 
+lograwcount <- as.matrix(log2(count_matrix +1))
+
+## taking top 1000 genes having highest variance selected from all the genes in the input
+top1000.order <- head(order(matrixStats::rowVars(lograwcount), decreasing = TRUE), 1000) 
+
+pp <- PCAtools::pca(lograwcount[top1000.order,], metadata =anno, removeVar = 0.01) ## performing PCA
+
+ #visualization of PCA plot
+biplot(pp)
+  
+#Create DESeq2 datasets 
+
+dds <- DESeqDataSetFromMatrix(countData = count_matrix, colData = anno, design = ~group)
+
+#View(counts(dds))
+
+dds <- estimateSizeFactors(dds)
+
+ ### Transform counts for data visualization
+vst <- vst(dds, blind=TRUE) 
+
+#Normalize the data
+normalized_counts <- as.data.frame(assay(vst))
+
+#Plot PCA
+plotPCA(vst, intgroup="group") 
+
+# Run DESeq2 (Differential Gene Expression Analysis)
+dds <- DESeq(dds, fitType='local')
+
+##ensure your data is a good fit for the DESeq2 model
+plotDispEsts(dds)
+
+#Extract result dateframe
+res <- results(dds)
+View(as.data.frame(res))
+
+# Filter differentially expressed genes
+alpha <- 0.05
+log2FoldChangeThreshold <- 1
+sigGenes <- subset(res, padj < alpha & abs(log2FoldChange) > log2FoldChangeThreshold)
+
+# Plot the results
+plotMA(res, alpha = alpha, ylim = c(-10, 10))
+
+# Heatmap of differentially expressed genes
+heatmap(assay(dds)[rownames(sigGenes), ], scale = "row", show_rownames = FALSE, col = colorRampPalette(c("blue", "white", "red"))(100))
+
+# Generate a normalized count matrix
+normCountMatrix <- counts(dds, normalized = TRUE)
+```
+```{r}
+#Volcano Plot
+
+library(EnhancedVolcano)
+
+volcano <- EnhancedVolcano(res,
+                lab = rownames(res),
+                x = 'log2FoldChange',
+                pCutoff = 1e-05,
+                FCcutoff = 1,
+                y = 'pvalue')
+volcano
+```
+```{r}
+#Threshold definition for cutoff (can be modified)
+p.threshold <- 0.05
+res$threshold <- as.logical(res$padj < p.threshold)  
+
+#Up regulated vs. Down regulated genes 
+#adding extra information, in which condition it's down or up (alternatively condition could be tumor vs norm.)
+firstC <- "High"
+SecondC <- "Low"
+nam <- paste('down_in',firstC,SecondC, sep = '_')   
+res[, nam] <- as.logical(res$log2FoldChange < 0)  
+
+ ### list of gene with Padjust < defined threshold
+genes.deseq <- row.names(res)[which(res$threshold)]  
+genes_deseq2_sig <- as.data.frame(res[which(res$threshold),]) #Our significant differential expressed genes
+genes_deseq2_sig$gene <- row.names(genes_deseq2_sig)
+View(as.data.frame(genes_deseq2_sig))
+head(genes_deseq2_sig)
+
+#Thresholds for Up/Down regulation 
+foldChangeThreshold <- 2  # Adjust as needed
+pValueThreshold <- 0.05   # Adjust as needed
+
+# Identify up-regulated significant genes
+upregulatedGenes <- rownames(genes_deseq2_sig)[genes_deseq2_sig$log2FoldChange > log2(foldChangeThreshold) & genes_deseq2_sig$padj < pValueThreshold]
+
+# Identify down-regulated significant genes
+downregulatedGenes <- rownames(genes_deseq2_sig)[genes_deseq2_sig$log2FoldChange < -log2(foldChangeThreshold) & genes_deseq2_sig$padj < pValueThreshold]
+
+
+cat("Number of upregulated genes:", length(upregulatedGenes), "\n")
+cat("Number of downregulated genes:", length(downregulatedGenes), "\n")
+
+# Save the lists of upregulated and downregulated genes
+#write.table(upregulatedGenes, "~/upregulated_genes.txt", quote = FALSE, row.names = FALSE)
+#write.table(downregulatedGenes, "~/downregulated_genes.txt", quote = FALSE, row.names = FALSE)
+```
+```{r}
+########### Plots normalized count of top 30 genes ## sorted based on padjust and filter by |logFC| >=1
+
+res$gene <- row.names(res)
+#View(as.data.frame(res))
+
+top30 <- res %>% 
+  as.data.frame %>%
+  arrange(padj) %>% 	#Arrange rows by padj values
+  filter(abs(log2FoldChange) >=1.5) %>%   #filter based on logFC
+  pull(gene) %>% 		#Extract character vector of ordered genes
+  head(n=30) 		#Extract the first 30 genes
+
+top30_norm <- as.data.frame(normalized_counts[rownames(normalized_counts) %in% top30,])
+
+top30_norm_v2 <- top30_norm ## will use later for heatmap
+
+top30_norm <- (top30_norm+1) ## in later step to remove infinity bias due to log
+
+top30_norm$gene <-  row.names(top30_norm)
+
+top30_norm <- top30_norm %>% 
+  pivot_longer(!gene, names_to = "samplename", values_to = "normalized_counts") # Gathering the columns to have normalized counts to a single column
+
+# Create tibbles including row names #for anno
+mov10_meta <- anno %>% 
+  rownames_to_column(var="samplename") %>% 
+  as_tibble()
+
+top30_norm <- inner_join(mov10_meta, top30_norm)  ## we are merging anno of 20 with previously extract format to draw dot plot
+
+################
+## plot using ggplot2
+
+ggplot(top30_norm) +
+  geom_point(aes(x = gene, y = normalized_counts, color = group)) +
+  scale_y_log10() + 
+  xlab("Genes") +
+  ylab("log 10 CPM Normalized Counts") +
+  ggtitle("Top 30 Significant DE Genes with abs(logFC) =>1") +
+  theme_bw() +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1)) +
+  theme(plot.title = element_text(hjust = 0.5))
+
+#Save results (Used for enrichment analysis)
+file <- paste('Deseq2_',firstC,'_v_',SecondC,'_results_significant_padj',p.threshold,'.csv',sep = '') 
+all_results <- paste('Deseq2_',firstC,'_v_',SecondC,'_all_results.csv',sep = '')
+
+res <- as.data.frame(res)
+
+#write.table(genes_deseq2_sig, file, sep = ",") ## significant results (including thresholds)
+#write.table(res,all_results,sep = ",")  ## no LogFC threshold (all results)
+
+```
+```{r}
+#EnrichR 
+listEnrichrSites()
+setEnrichrSite("Enrichr") #Human genes
+```
+
+```{r}
+#Libraries of interest
+interest <- c("GO_Molecular_Function_2015", "GO_Cellular_Component_2015", "GO_Biological_Process_2015","Reactome_2022"
+)
+
+#Set of genes (significant genes from DGE)
+Gene_info <- genes_deseq2_sig$gene
+#Analyze genes
+enriched <- enrichr(Gene_info, interest)
+
+plotEnrich(enriched[[1]], showTerms = 30, numChar = 40, y = "Count", orderBy = "P.value")
+plotEnrich(enriched[[2]], showTerms = 30, numChar = 40, y = "Count", orderBy = "P.value")
+plotEnrich(enriched[[3]], showTerms = 30, numChar = 40, y = "Count", orderBy = "P.value")
+plotEnrich(enriched[[4]], showTerms = 30, numChar = 40, y = "Count", orderBy = "P.value")
+```
+
+Add a new chunk by clicking the *Insert Chunk* button on the toolbar or by pressing *Ctrl+Alt+I*.
+
+When you save the notebook, an HTML file containing the code and output will be saved alongside it (click the *Preview* button or press *Ctrl+Shift+K* to preview the HTML file).
+
+The preview shows you a rendered HTML copy of the contents of the editor. Consequently, unlike *Knit*, *Preview* does not run any R code chunks. Instead, the output of the chunk when it was last run in the editor is displayed.
