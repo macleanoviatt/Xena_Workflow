@@ -1,5 +1,6 @@
 ---
-title: "R Notebook"
+title: "Xena Workflow with downstream analysis"
+author: Maclean Oviatt
 output: html_notebook
 ---
 
