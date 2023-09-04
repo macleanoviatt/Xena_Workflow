@@ -5,6 +5,18 @@ output: html_notebook
 ---
 
 ```{r}
+suppressMessages(library(UCSCXenaTools))
+suppressMessages(library(dplyr))
+suppressMessages(library(ggplot2))
+suppressMessages(library(survival))
+suppressMessages(library(survminer))
+suppressMessages(library(dlookr))
+suppressMessages(library(TCGAbiolinks))
+suppressMessages(library(limma))
+suppressMessages(library(tidyr))
+```
+
+```{r}
 #Input your TCGA cohort of interest and gene target:
   
 #Gene or Genes of interest 
